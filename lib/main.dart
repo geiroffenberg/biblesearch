@@ -1,8 +1,11 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 class AppColors {
@@ -29,6 +32,10 @@ class AppColors {
 }
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+    MobileAds.instance.initialize();
+  }
   runApp(const BibleSearchApp());
 }
 
@@ -418,10 +425,11 @@ class _BibleReaderPageState extends State<BibleReaderPage> {
                       _selectedWords = {};
                     });
                   },
-                  onCopy: () => _copyFilteredVerses(verses),
+                  onSearch: _showSearchDialog,
                   onShowInfo: _showInfo,
                   onToggleTextSize: _toggleTextSize,
                 ),
+                const _AdBanner(),
               ],
             );
           },
@@ -430,23 +438,88 @@ class _BibleReaderPageState extends State<BibleReaderPage> {
     );
   }
 
-  void _copyFilteredVerses(List<BibleVerse> verses) {
-    if (!_isFiltered) return;
-    final filtered = _computeFilteredVerses(verses);
-    if (filtered.isEmpty) return;
-    final buffer = StringBuffer();
-    for (final v in filtered) {
-      buffer.writeln('${v.bookName} ${v.chapter}:${v.verse}  ${v.text}');
+  void _showSearchDialog() {
+    final controller = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    void submit() {
+      if (!(formKey.currentState?.validate() ?? false)) return;
+      final word = controller.text.trim().toLowerCase();
+      Navigator.of(context).pop();
+      _toggleSelectedWord(word);
     }
-    Clipboard.setData(ClipboardData(text: buffer.toString().trimRight()));
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          '${filtered.length} verse${filtered.length == 1 ? '' : 's'} copied to clipboard',
-        ),
-        duration: const Duration(seconds: 2),
-      ),
+
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Search word'),
+          content: Form(
+            key: formKey,
+            child: TextFormField(
+              controller: controller,
+              autofocus: true,
+              textInputAction: TextInputAction.search,
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z]')),
+              ],
+              decoration: const InputDecoration(
+                hintText: 'Enter a single word',
+                border: OutlineInputBorder(),
+              ),
+              validator: (value) {
+                final v = value?.trim() ?? '';
+                if (v.isEmpty) return 'Please enter a word';
+                if (!RegExp(r'^[A-Za-z]+$').hasMatch(v)) {
+                  return 'Letters only, no spaces';
+                }
+                return null;
+              },
+              onFieldSubmitted: (_) => submit(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: submit,
+              child: const Text('Search'),
+            ),
+          ],
+        );
+      },
     );
+  }
+
+  void _toggleSelectedWord(String word, {BibleVerse? originVerse}) {
+    if (word.isEmpty) return;
+    setState(() {
+      final wasFiltered = _selectedWords.isNotEmpty;
+      if (originVerse != null) {
+        _lastTappedVerse = originVerse;
+      }
+      final next = Set<String>.from(_selectedWords);
+      if (next.contains(word)) {
+        next.remove(word);
+      } else {
+        next.add(word);
+      }
+      _selectedWords = next;
+      if (wasFiltered && next.isEmpty) {
+        if (_lastTappedVerse != null) {
+          _selectedBook = _lastTappedVerse!.bookName;
+          _selectedChapter = _lastTappedVerse!.chapter;
+          _pendingScrollToAnchorVerse = true;
+          _pendingScrollToSelection = true;
+        }
+      }
+      if (!wasFiltered && next.isNotEmpty) {
+        _pendingScrollToAnchorVerse = true;
+        _pendingScrollToSelection = true;
+      }
+    });
   }
 
   void _toggleTextSize() {
@@ -503,9 +576,9 @@ class _BibleReaderPageState extends State<BibleReaderPage> {
                 ),
                 Row(
                   children: [
-                    Icon(Icons.copy_outlined, size: 18),
+                    Icon(Icons.search, size: 18),
                     SizedBox(width: 6),
-                    Text('Copy filtered verses to clipboard'),
+                    Text('Search for a word to filter verses'),
                   ],
                 ),
                 Row(
@@ -676,31 +749,7 @@ class _BibleReaderPageState extends State<BibleReaderPage> {
           tokenLower.startsWith(matchedPrefix);
       final toggleWord = hasVisiblePrefix ? matchedPrefix : normalized;
 
-      void onTokenTap() {
-        setState(() {
-          final wasFiltered = _selectedWords.isNotEmpty;
-          _lastTappedVerse = verse;
-          final next = Set<String>.from(_selectedWords);
-          if (next.contains(toggleWord)) {
-            next.remove(toggleWord);
-          } else {
-            next.add(toggleWord);
-          }
-          _selectedWords = next;
-          if (wasFiltered && next.isEmpty) {
-            if (_lastTappedVerse != null) {
-              _selectedBook = _lastTappedVerse!.bookName;
-              _selectedChapter = _lastTappedVerse!.chapter;
-              _pendingScrollToAnchorVerse = true;
-              _pendingScrollToSelection = true;
-            }
-          }
-          if (!wasFiltered && next.isNotEmpty) {
-            _pendingScrollToAnchorVerse = true;
-            _pendingScrollToSelection = true;
-          }
-        });
-      }
+      void onTokenTap() => _toggleSelectedWord(toggleWord, originVerse: verse);
 
       if (hasVisiblePrefix) {
         final prefixLength = matchedPrefix.length;
@@ -866,14 +915,14 @@ class _BottomActionBar extends StatelessWidget {
   const _BottomActionBar({
     required this.hasSelectedWords,
     required this.onReset,
-    required this.onCopy,
+    required this.onSearch,
     required this.onShowInfo,
     required this.onToggleTextSize,
   });
 
   final bool hasSelectedWords;
   final VoidCallback onReset;
-  final VoidCallback onCopy;
+  final VoidCallback onSearch;
   final VoidCallback onShowInfo;
   final VoidCallback onToggleTextSize;
 
@@ -924,13 +973,84 @@ class _BottomActionBar extends StatelessWidget {
               VerticalDivider(width: 1, thickness: 1, color: dividerColor),
               barButton(icon: Icons.text_increase, onTap: onToggleTextSize),
               VerticalDivider(width: 1, thickness: 1, color: dividerColor),
-              barButton(icon: Icons.copy_outlined, onTap: onCopy),
+              barButton(icon: Icons.search, onTap: onSearch),
               VerticalDivider(width: 1, thickness: 1, color: dividerColor),
               barButton(icon: Icons.info_outline, onTap: onShowInfo),
             ],
           ),
         ),
       ),
+    );
+  }
+}
+
+class _AdBanner extends StatefulWidget {
+  const _AdBanner();
+
+  @override
+  State<_AdBanner> createState() => _AdBannerState();
+}
+
+class _AdBannerState extends State<_AdBanner> {
+  BannerAd? _bannerAd;
+  bool _isLoaded = false;
+
+  // Google's official test banner ad unit IDs.
+  // Replace with your real AdMob ad unit IDs before release.
+  static const String _androidTestUnitId =
+      'ca-app-pub-3940256099942544/6300978111';
+  static const String _iosTestUnitId =
+      'ca-app-pub-3940256099942544/2934735716';
+
+  bool get _adsSupported =>
+      !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+
+  @override
+  void initState() {
+    super.initState();
+    if (_adsSupported) {
+      _loadAd();
+    }
+  }
+
+  void _loadAd() {
+    final adUnitId =
+        Platform.isAndroid ? _androidTestUnitId : _iosTestUnitId;
+    final ad = BannerAd(
+      adUnitId: adUnitId,
+      size: AdSize.banner,
+      request: const AdRequest(),
+      listener: BannerAdListener(
+        onAdLoaded: (_) {
+          if (!mounted) return;
+          setState(() => _isLoaded = true);
+        },
+        onAdFailedToLoad: (ad, error) {
+          ad.dispose();
+        },
+      ),
+    );
+    ad.load();
+    _bannerAd = ad;
+  }
+
+  @override
+  void dispose() {
+    _bannerAd?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_adsSupported || !_isLoaded || _bannerAd == null) {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      color: Colors.black,
+      width: _bannerAd!.size.width.toDouble(),
+      height: _bannerAd!.size.height.toDouble(),
+      alignment: Alignment.center,
+      child: AdWidget(ad: _bannerAd!),
     );
   }
 }
